@@ -1,15 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Temperature — Last 24 Hours</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 20px; color: #111; }
+    header { display:flex; align-items:center; gap:16px; margin-bottom:12px; }
+    h1 { font-size:1.1rem; margin:0; }
+    .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+    input[type="file"] { display:inline-block; }
+    button { padding:6px 10px; border-radius:6px; border:1px solid #bbb; background:#f6f6f6; cursor:pointer; }
+    button:hover { background:#eef; }
+    #stats { margin-top:8px; font-size:0.95rem; }
+    #message { color:#666; margin-top:8px; }
+    canvas { background: #fff; border:1px solid #ddd; border-radius:6px; max-width:100%; }
+    .legend { margin-top:8px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .dot { width:12px; height:12px; border-radius:50%; display:inline-block; margin-right:6px; vertical-align:middle; }
+    @media (max-width:600px){ header { flex-direction:column; align-items:flex-start } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Temperature — Last 24 hours</h1>
+    <div style="color:#666;font-size:0.95rem;">Reads a plaintext file and draws the last-24h graph</div>
+  </header>
 
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Current Time Report</title>
-    </head>
-    <body>
-        <p><strong>Friday, January 23, 2026 10:43 AM</strong></p>
-        <p><strong>Temperatura w domu: 18.4375</strong></p>
-        <p><strong>Temperatura na zewnątrz: -1.33</strong></p>
-        <p><strong>Marek &Aksamit.com@.PL$.XD.%ro.*D.NL.CN*.JP</strong></p>
-    </body>
-    </html>
-    
+  <div class="controls">
+    <label>
+      Load file:
+      <input id="fileInput" type="file" accept=".txt,.csv" />
+    </label>
+
+    <button id="fetchBtn">Fetch "temperatures.txt" (same origin)</button>
+    <button id="reloadBtn">Re-draw</button>
+    <button id="downloadBtn">Download chart PNG</button>
+  </div>
+
+  <div id="message">Supported file formats (per line): <code>2026-01-23T12:34:00Z,23.5</code>, <code>1611350400,23.5</code> (unix seconds or ms), or <code>23.5</code> (one value per minute — last reading is latest).</div>
+
+  <div id="stats" aria-live="polite"></div>
+
+  <canvas id="chart" width="1000" height="360" role="img" aria-label="Temperature over last 24 hours"></canvas>
+
+  <div class="legend">
+    <span><span class="dot" style="background:#1976d2"></span>Temperature</span>
+  </div>
+
+  <script>
+  (function () {
+    const canvas = document.getElementById('chart');
+    const ctx = canvas.getContext('2d');
+    const fileInput = document.getElementById('fileInput');
+    const fetchBtn = document.getElementById('fetchBtn');
+    const reloadBtn = document.getElementById('reloadBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const statsEl = document.getElementById('stats');
+    const msgEl = document.getElementById('message');
+
+    let rawDataText = null;
+    let parsedPoints = []; // {t:Date, v:Number}
+
+    // Read sample formats:
+    //  - ISO timestamp, comma, value
+    //  - Unix seconds or ms, comma, value
+    //  - Or single numeric value per line (interpreted as successive samples ending now, 1/min spacing)
+    function parseText(text) {
+      const lines = text.split(/\r?\n/);
+      const points = [];
+      for (let raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        if (line.startsWith('#')) continue;
+        // Try comma separated
+        const parts = line.split(/[,\t]/).map(s => s.trim()).filter(Boolean);
+        if (parts.length >= 2) {
+          const tstr = parts[0];
+          const vstr = parts[1];
+          const v = Number(vstr);
+          if (isNaN(v)) continue;
+          const t = parseTimestamp(tstr);
+          if (!t) continue;
+          points.push({ t, v });
+        } else if (parts.length === 1) {
+          // single number -> only value, timestamp unknown
+          const v = Number(parts[0]);
+          if (isNaN(v)) continue;
+          points.push({ t: null, v });
+        }
+      }
+
+      // If there are unnamed timestamps (t === null), assign them evenly ending now, one per minute.
+      const nulls = points.filter(p => p.t === null);
+      if (nulls.length) {
+        const now = Date.now();
+        const minute = 60_000;
+        // Place them ending at now, spaced by 1 minute backwards (oldest first)
+        for (let i = 0; i < nulls.length; i++) {
+          const ageIndex = nulls.length - 1 - i;
+          nulls[i].t = new Date(now - ageIndex * minute);
+        }
+      }
+
+      // Sort by time ascending
+      points.sort((a, b) => a.t - b.t);
+      return points;
+    }
+
+    function parseTimestamp(s) {
+      // ISO?
+      const iso = Date.parse(s);
+      if (!isNaN(iso)) return new Date(iso);
+      // numeric?
+      const n = Number(s);
+      if (!isNaN(n)) {
+        // decide ms or s
+        if (n > 1e12) return new Date(n); // already ms
+        if (n > 1e9) return new Date(n * 1000); // seconds -> ms
+      }
+      // fallback: try replacing space with T
+      const alt = Date.parse(s.replace(' ', 'T'));
+      if (!isNaN(alt)) return new Date(alt);
+      return null;
+    }
+
+    function filterLast24(points) {
+      const now = Date.now();
+      const start = now - 24 * 60 * 60 * 1000;
+      return points.filter(p => p.t.getTime() >= start && p.t.getTime() <= now);
+    }
+
+    function computeStats(points) {
+      if (!points.length) return null;
+      let sum = 0, min = Infinity, max = -Infinity;
+      for (const p of points) {
+        sum += p.v;
+        if (p.v < min) min = p.v;
+        if (p.v > max) max = p.v;
+      }
+      return {
+        count: points.length,
+        avg: sum / points.length,
+        min, max,
+        first: points[0].t,
+        last: points[points.length-1].t
+      };
+    }
+
+    // Drawing utilities
+    function clearCanvas() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // white background
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function drawGrid(x0, y0, x1, y1, xTicks, yTicks) {
+      ctx.strokeStyle = '#eee';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      // vertical grid
+      for (const x of xTicks) {
+        ctx.moveTo(x, y0);
+        ctx.lineTo(x, y1);
+      }
+      // horizontal grid
+      for (const y of yTicks) {
+        ctx.moveTo(x0, y);
+        ctx.lineTo(x1, y);
+      }
+      ctx.stroke();
+    }
+
+    function niceTimeLabel(date) {
+      const now = new Date();
+      const diff = now - date;
+      // within same day -> show hours:minutes
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function drawChart(points) {
+      clearCanvas();
+      if (!points.length) {
+        ctx.fillStyle = '#333';
+        ctx.font = '14px system-ui, Arial';
+        ctx.fillText('No data available for the last 24 hours', 20, 40);
+        return;
+      }
+
+      // layout
+      const margin = { left: 60, right: 14, top: 18, bottom: 36 };
+      const chartW = canvas.width - margin.left - margin.right;
+      const chartH = canvas.height - margin.top - margin.bottom;
+      const x0 = margin.left, y0 = margin.top, x1 = margin.left + chartW, y1 = margin.top + chartH;
+
+      // compute min/max
+      let vmin = Infinity, vmax = -Infinity;
+      for (const p of points) {
+        if (p.v < vmin) vmin = p.v;
+        if (p.v > vmax) vmax = p.v;
+      }
+      if (vmin === vmax) { // flat line: pad
+        vmin -= 1;
+        vmax += 1;
+      } else {
+        const pad = (vmax - vmin) * 0.12;
+        vmin -= pad;
+        vmax += pad;
+      }
+
+      const tmin = points[0].t.getTime();
+      const tmax = points[points.length-1].t.getTime();
+
+      const mapX = t => x0 + ( (t - tmin) / (tmax - tmin || 1) ) * chartW;
+      const mapY = v => y0 + (1 - ( (v - vmin) / (vmax - vmin || 1) )) * chartH;
+
+      // compute tick positions
+      const yTicksCount = 5;
+      const yTicks = [];
+      const yTickValues = [];
+      for (let i=0;i<=yTicksCount;i++) {
+        const frac = i / yTicksCount;
+        const y = y0 + (1 - frac) * chartH;
+        yTicks.push(y);
+        yTickValues.push(vmin + frac * (vmax - vmin));
+      }
+
+      // time ticks: choose every 3 hours or adaptively
+      const msPerHour = 3600_000;
+      const rangeHours = Math.max(1, (tmax - tmin) / msPerHour);
+      const approxTicks = Math.min(8, Math.max(3, Math.round(rangeHours / 3)));
+      const tickIntervalMs = Math.ceil((tmax - tmin) / approxTicks / 60000) * 60000; // round to minute
+      const xTicks = [];
+      const xTickDates = [];
+      // start at a "nice" boundary
+      const startDate = new Date(tmin);
+      const startMs = Math.floor(startDate.getTime() / tickIntervalMs) * tickIntervalMs;
+      for (let ts = startMs; ts <= tmax; ts += tickIntervalMs) {
+        xTicks.push(mapX(ts));
+        xTickDates.push(new Date(ts));
+      }
+
+      // grid
+      drawGrid(x0, y0, x1, y1, xTicks, yTicks);
+
+      // axes
+      ctx.strokeStyle = '#888';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x0, y1);
+      ctx.lineTo(x1, y1); // x axis
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x0, y1); // y axis
+      ctx.stroke();
+
+      // y labels
+      ctx.fillStyle = '#333';
+      ctx.font = '12px system-ui, Arial';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      for (let i=0;i<yTickValues.length;i++) {
+        const val = yTickValues[i];
+        const y = yTicks[i];
+        ctx.fillText(Number(val.toFixed(2)), x0 - 8, y);
+      }
+
+      // x labels
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      for (let i=0;i<xTickDates.length;i++) {
+        const d = xTickDates[i];
+        const x = xTicks[i];
+        ctx.fillText(niceTimeLabel(d), x, y1 + 6);
+      }
+
+      // draw line
+      ctx.beginPath();
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = '#1976d2';
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      for (let i=0;i<points.length;i++) {
+        const p = points[i];
+        const x = mapX(p.t.getTime());
+        const y = mapY(p.v);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // draw area under curve (light)
+      ctx.lineTo(mapX(points[points.length-1].t.getTime()), y1);
+      ctx.lineTo(mapX(points[0].t.getTime()), y1);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(25,118,210,0.06)';
+      ctx.fill();
+
+      // draw points
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#1976d2';
+      ctx.lineWidth = 1.2;
+      for (const p of points) {
+        const x = mapX(p.t.getTime());
+        const y = mapY(p.v);
+        ctx.beginPath();
+        ctx.arc(x, y, 3.2, 0, Math.PI*2);
+        ctx.fill();
+        ctx.stroke();
+      }
+
+      // interactivity: simple tooltip on hover
+      canvas.onmousemove = function (ev) {
+        const rect = canvas.getBoundingClientRect();
+        const mx = ev.clientX - rect.left;
+        const my = ev.clientY - rect.top;
+        // find nearest point within some px
+        let best = null, bestDist = Infinity;
+        for (const p of points) {
+          const x = mapX(p.t.getTime());
+          const y = mapY(p.v);
+          const dx = x - mx, dy = y - my;
+          const d2 = dx*dx + dy*dy;
+          if (d2 < bestDist) { bestDist = d2; best = {p, x, y}; }
+        }
+        // if close enough show a small tooltip
+        if (best && bestDist < 14*14) {
+          // redraw to clear previous hover marker
+          drawChart(points); // crude but simple -> avoid layering complexity
+          // draw marker
+          ctx.beginPath();
+          ctx.fillStyle = '#1976d2';
+          ctx.arc(best.x, best.y, 5, 0, Math.PI*2);
+          ctx.fill();
+          // tooltip
+          const txt = best.p.t.toLocaleString() + ' — ' + best.p.v.toFixed(2) + ' °';
+          const padding = 6;
+          ctx.font = '12px system-ui, Arial';
+          const metrics = ctx.measureText(txt);
+          const tw = metrics.width + padding*2;
+          const th = 20;
+          let tx = best.x + 12;
+          let ty = best.y - th - 6;
+          if (tx + tw > canvas.width - 6) tx = best.x - tw - 12;
+          if (ty < 6) ty = best.y + 12;
+          // box
+          ctx.fillStyle = 'rgba(0,0,0,0.75)';
+          roundRect(ctx, tx, ty, tw, th, 6, true, false);
+          // text
+          ctx.fillStyle = '#fff';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(txt, tx + padding, ty + th/2);
+        } else {
+          // when not hovering enough, we still want normal chart drawn (keep hover clear)
+          // no-op: the chart has been redrawn already by drawChart call in previous hover; optional optimization omitted
+        }
+      };
+
+      // helper draw rounded rect
+      function roundRect(ctx, x, y, w, h, r, fill, stroke) {
+        if (w < 2 * r) r = w / 2;
+        if (h < 2 * r) r = h / 2;
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+        if (fill) ctx.fill();
+        if (stroke) ctx.stroke();
+      }
+    }
+
+    async function loadFromFetch() {
+      try {
+        const res = await fetch('temperatures.txt', {cache: 'no-store'});
+        if (!res.ok) throw new Error('Fetch failed: ' + res.status);
+        const txt = await res.text();
+        rawDataText = txt;
+        parsedPoints = parseText(txt);
+        updateAndDraw();
+      } catch (err) {
+        alert('Error fetching temperatures.txt: ' + err.message + '\nNote: the file must be served from the same origin as this page (or CORS enabled).');
+      }
+    }
+
+    function handleFile(file) {
+      const reader = new FileReader();
+      reader.onload = function (e) {
+        rawDataText = e.target.result;
+        parsedPoints = parseText(rawDataText);
+        updateAndDraw();
+      };
+      reader.readAsText(file);
+    }
+
+    function updateAndDraw() {
+      const last24 = filterLast24(parsedPoints);
+      const stats = computeStats(last24);
+      if (stats) {
+        statsEl.innerHTML = `
+          Count: ${stats.count} readings — Min: ${stats.min.toFixed(2)} °, Max: ${stats.max.toFixed(2)} °, Avg: ${stats.avg.toFixed(2)} °<br>
+          From: ${stats.first.toLocaleString()} to ${stats.last.toLocaleString()}
+        `;
+      } else {
+        statsEl.textContent = 'No readings in the last 24 hours.';
+      }
+      drawChart(last24);
+    }
+
+    // initial example: empty chart message
+    clearCanvas();
+    ctx.fillStyle = '#333';
+    ctx.font = '14px system-ui, Arial';
+    ctx.fillText('Load a temperature text file (see formats in the message above)', 20, 40);
+
+    // events
+    fileInput.addEventListener('change', (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) handleFile(f);
+    });
+
+    fetchBtn.addEventListener('click', () => {
+      loadFromFetch();
+    });
+
+    reloadBtn.addEventListener('click', () => {
+      if (rawDataText === null) {
+        alert('No file loaded yet. Either pick a file or click "Fetch temperatures.txt".');
+        return;
+      }
+      parsedPoints = parseText(rawDataText);
+      updateAndDraw();
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      const url = canvas.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'temperature-last-24h.png';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    });
+
+    // expose parse helper for console (debug)
+    window._tempChart = {
+      parseText, parseTimestamp, updateAndDraw
+    };
+  })();
+  </script>
+</body>
+</html>
