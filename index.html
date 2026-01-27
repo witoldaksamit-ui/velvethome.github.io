@@ -14,7 +14,7 @@
     button:hover { background:#eef; }
     #stats { margin-top:8px; font-size:0.95rem; }
     #message { color:#666; margin-top:8px; }
-    canvas { background: #fff; border:1px solid #ddd; border-radius:6px; max-width:100%; }
+    canvas { background: #fff; border:1px solid #ddd; border-radius:6px; max-width:100%; display:block; margin-bottom:12px; }
     .legend { margin-top:8px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
     .dot { width:12px; height:12px; border-radius:50%; display:inline-block; margin-right:6px; vertical-align:middle; }
     @media (max-width:600px){ header { flex-direction:column; align-items:flex-start } }
@@ -23,7 +23,7 @@
 <body>
   <header>
     <h1>Temperature — Last 24 hours</h1>
-    <div style="color:#666;font-size:0.95rem;">Reads a plaintext file and draws the last-24h graph</div>
+    <div style="color:#666;font-size:0.95rem;">Reads a plaintext file and draws the last-24h graphs (top and bottom)</div>
   </header>
 
   <div class="controls">
@@ -34,23 +34,30 @@
 
     <button id="fetchBtn">Fetch "temperatures.txt" (same origin)</button>
     <button id="reloadBtn">Re-draw</button>
-    <button id="downloadBtn">Download chart PNG</button>
+    <button id="downloadBtn">Download both charts PNG</button>
   </div>
 
-  <div id="message">Supported file formats (per line): <code>2026-01-23T12:34:00Z,23.5</code>, <code>1611350400,23.5</code> (unix seconds or ms), or <code>23.5</code> (one value per minute — last re[...]
+  <div id="message">Supported file formats (per line): <code>2026-01-23T12:34:00Z,XX,YY</code> where XX is the top graph value and YY is the bottom graph value. Also accepts older formats: <code>1611350400,23.5</code> (unix seconds or ms), or single-value lines — those will be used for both graphs.</div>
 
   <div id="stats" aria-live="polite"></div>
 
-  <canvas id="chart" width="1000" height="360" role="img" aria-label="Temperature over last 24 hours"></canvas>
+  <!-- Top chart -->
+  <canvas id="chartTop" width="1000" height="320" role="img" aria-label="Top: Temperature series A over last 24 hours"></canvas>
+  <!-- Bottom chart -->
+  <canvas id="chartBottom" width="1000" height="320" role="img" aria-label="Bottom: Temperature series B over last 24 hours"></canvas>
 
   <div class="legend">
-    <span><span class="dot" style="background:#1976d2"></span>Temperature</span>
+    <span><span class="dot" style="background:#1976d2"></span>Top series (XX)</span>
+    <span><span class="dot" style="background:#d32f2f"></span>Bottom series (YY)</span>
   </div>
 
   <script>
   (function () {
-    const canvas = document.getElementById('chart');
-    const ctx = canvas.getContext('2d');
+    const canvasTop = document.getElementById('chartTop');
+    const ctxTop = canvasTop.getContext('2d');
+    const canvasBottom = document.getElementById('chartBottom');
+    const ctxBottom = canvasBottom.getContext('2d');
+
     const fileInput = document.getElementById('fileInput');
     const fetchBtn = document.getElementById('fetchBtn');
     const reloadBtn = document.getElementById('reloadBtn');
@@ -59,12 +66,12 @@
     const msgEl = document.getElementById('message');
 
     let rawDataText = null;
-    let parsedPoints = []; // {t:Date, v:Number}
+    let parsedPoints = []; // {t:Date, v1:Number|null, v2:Number|null}
 
-    // Read sample formats:
-    //  - ISO timestamp, comma, value
-    //  - Unix seconds or ms, comma, value
-    //  - Or single numeric value per line (interpreted as successive samples ending now, 1/min spacing)
+    // Parse text lines. Supported:
+    //  - timestamp, v1, v2
+    //  - timestamp, v   (v -> both series)
+    //  - single numeric per line -> treated as value for both series (timestamps auto-assigned)
     function parseText(text) {
       const lines = text.split(/\r?\n/);
       const points = [];
@@ -72,37 +79,43 @@
         const line = raw.trim();
         if (!line) continue;
         if (line.startsWith('#')) continue;
-        // Try comma separated
         const parts = line.split(/[,\t]/).map(s => s.trim()).filter(Boolean);
-        if (parts.length >= 2) {
+        if (parts.length >= 3) {
           const tstr = parts[0];
-          const vstr = parts[1];
-          const v = Number(vstr);
+          const v1 = Number(parts[1]);
+          const v2 = Number(parts[2]);
+          if (isNaN(v1) && isNaN(v2)) continue;
+          const t = parseTimestamp(tstr);
+          if (!t) continue;
+          points.push({ t, v1: isNaN(v1) ? null : v1, v2: isNaN(v2) ? null : v2 });
+        } else if (parts.length === 2) {
+          // timestamp, value -> use value for both series
+          const tstr = parts[0];
+          const v = Number(parts[1]);
           if (isNaN(v)) continue;
           const t = parseTimestamp(tstr);
           if (!t) continue;
-          points.push({ t, v });
+          points.push({ t, v1: v, v2: v });
         } else if (parts.length === 1) {
-          // single number -> only value, timestamp unknown
+          // single number -> only value, timestamp unknown (will be assigned later)
           const v = Number(parts[0]);
           if (isNaN(v)) continue;
-          points.push({ t: null, v });
+          points.push({ t: null, v1: v, v2: v });
         }
       }
 
-      // If there are unnamed timestamps (t === null), assign them evenly ending now, one per minute.
+      // assign timestamps to points with null t (end now, spaced 1 minute)
       const nulls = points.filter(p => p.t === null);
       if (nulls.length) {
         const now = Date.now();
         const minute = 60_000;
-        // Place them ending at now, spaced by 1 minute backwards (oldest first)
         for (let i = 0; i < nulls.length; i++) {
           const ageIndex = nulls.length - 1 - i;
           nulls[i].t = new Date(now - ageIndex * minute);
         }
       }
 
-      // Sort by time ascending
+      // sort ascending
       points.sort((a, b) => a.t - b.t);
       return points;
     }
@@ -114,8 +127,7 @@
       // numeric?
       const n = Number(s);
       if (!isNaN(n)) {
-        // decide ms or s
-        if (n > 1e12) return new Date(n); // already ms
+        if (n > 1e12) return new Date(n); // ms
         if (n > 1e9) return new Date(n * 1000); // seconds -> ms
       }
       // fallback: try replacing space with T
@@ -130,41 +142,39 @@
       return points.filter(p => p.t.getTime() >= start && p.t.getTime() <= now);
     }
 
-    function computeStats(points) {
-      if (!points.length) return null;
+    function computeStats(points, key) {
+      const vals = points.map(p => p[key]).filter(v => v !== null && v !== undefined && !isNaN(v));
+      if (!vals.length) return null;
       let sum = 0, min = Infinity, max = -Infinity;
-      for (const p of points) {
-        sum += p.v;
-        if (p.v < min) min = p.v;
-        if (p.v > max) max = p.v;
+      for (const v of vals) {
+        sum += v;
+        if (v < min) min = v;
+        if (v > max) max = v;
       }
       return {
-        count: points.length,
-        avg: sum / points.length,
+        count: vals.length,
+        avg: sum / vals.length,
         min, max,
-        first: points[0].t,
-        last: points[points.length-1].t
+        first: points.find(p => p[key] !== null && p[key] !== undefined).t,
+        last: (() => { for (let i = points.length-1; i >=0; i--) if (points[i][key] !== null && points[i][key] !== undefined) return points[i].t; return null; })()
       };
     }
 
-    // Drawing utilities
-    function clearCanvas() {
+    // drawing helpers (draw single series on given canvas/context)
+    function clearCanvas(ctx, canvas) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      // white background
       ctx.fillStyle = '#fff';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
-    function drawGrid(x0, y0, x1, y1, xTicks, yTicks) {
+    function drawGrid(ctx, x0, y0, x1, y1, xTicks, yTicks) {
       ctx.strokeStyle = '#eee';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      // vertical grid
       for (const x of xTicks) {
         ctx.moveTo(x, y0);
         ctx.lineTo(x, y1);
       }
-      // horizontal grid
       for (const y of yTicks) {
         ctx.moveTo(x0, y);
         ctx.lineTo(x1, y);
@@ -173,18 +183,18 @@
     }
 
     function niceTimeLabel(date) {
-      const now = new Date();
-      const diff = now - date;
-      // within same day -> show hours:minutes
       return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
 
-    function drawChart(points) {
-      clearCanvas();
-      if (!points.length) {
+    function drawSingleChart(canvas, ctx, points, valueKey, color) {
+      clearCanvas(ctx, canvas);
+
+      // filter only points that have a valid value for this series
+      const pts = points.filter(p => p[valueKey] !== null && p[valueKey] !== undefined && !isNaN(p[valueKey]));
+      if (!pts.length) {
         ctx.fillStyle = '#333';
         ctx.font = '14px system-ui, Arial';
-        ctx.fillText('No data available for the last 24 hours', 20, 40);
+        ctx.fillText('No data available for the last 24 hours (series)', 20, 40);
         return;
       }
 
@@ -194,28 +204,23 @@
       const chartH = canvas.height - margin.top - margin.bottom;
       const x0 = margin.left, y0 = margin.top, x1 = margin.left + chartW, y1 = margin.top + chartH;
 
-      // compute min/max
+      // compute min/max for this series
       let vmin = Infinity, vmax = -Infinity;
-      for (const p of points) {
-        if (p.v < vmin) vmin = p.v;
-        if (p.v > vmax) vmax = p.v;
+      for (const p of pts) {
+        const v = p[valueKey];
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
       }
-      if (vmin === vmax) { // flat line: pad
-        vmin -= 1;
-        vmax += 1;
-      } else {
-        const pad = (vmax - vmin) * 0.12;
-        vmin -= pad;
-        vmax += pad;
-      }
+      if (vmin === vmax) { vmin -= 1; vmax += 1; }
+      else { const pad = (vmax - vmin) * 0.12; vmin -= pad; vmax += pad; }
 
-      const tmin = points[0].t.getTime();
-      const tmax = points[points.length-1].t.getTime();
+      const tmin = pts[0].t.getTime();
+      const tmax = pts[pts.length-1].t.getTime();
 
       const mapX = t => x0 + ( (t - tmin) / (tmax - tmin || 1) ) * chartW;
       const mapY = v => y0 + (1 - ( (v - vmin) / (vmax - vmin || 1) )) * chartH;
 
-      // compute tick positions
+      // y ticks
       const yTicksCount = 5;
       const yTicks = [];
       const yTickValues = [];
@@ -226,14 +231,13 @@
         yTickValues.push(vmin + frac * (vmax - vmin));
       }
 
-      // time ticks: choose every 3 hours or adaptively
+      // x ticks (adaptive)
       const msPerHour = 3600_000;
       const rangeHours = Math.max(1, (tmax - tmin) / msPerHour);
       const approxTicks = Math.min(8, Math.max(3, Math.round(rangeHours / 3)));
-      const tickIntervalMs = Math.ceil((tmax - tmin) / approxTicks / 60000) * 60000; // round to minute
+      const tickIntervalMs = Math.ceil((tmax - tmin) / approxTicks / 60000) * 60000;
       const xTicks = [];
       const xTickDates = [];
-      // start at a "nice" boundary
       const startDate = new Date(tmin);
       const startMs = Math.floor(startDate.getTime() / tickIntervalMs) * tickIntervalMs;
       for (let ts = startMs; ts <= tmax; ts += tickIntervalMs) {
@@ -242,16 +246,16 @@
       }
 
       // grid
-      drawGrid(x0, y0, x1, y1, xTicks, yTicks);
+      drawGrid(ctx, x0, y0, x1, y1, xTicks, yTicks);
 
       // axes
       ctx.strokeStyle = '#888';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(x0, y1);
-      ctx.lineTo(x1, y1); // x axis
+      ctx.lineTo(x1, y1);
       ctx.moveTo(x0, y0);
-      ctx.lineTo(x0, y1); // y axis
+      ctx.lineTo(x0, y1);
       ctx.stroke();
 
       // y labels
@@ -277,63 +281,62 @@
       // draw line
       ctx.beginPath();
       ctx.lineWidth = 2.5;
-      ctx.strokeStyle = '#1976d2';
+      ctx.strokeStyle = color;
       ctx.lineJoin = 'round';
       ctx.lineCap = 'round';
-      for (let i=0;i<points.length;i++) {
-        const p = points[i];
+      for (let i=0;i<pts.length;i++) {
+        const p = pts[i];
         const x = mapX(p.t.getTime());
-        const y = mapY(p.v);
+        const y = mapY(p[valueKey]);
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
 
-      // draw area under curve (light)
-      ctx.lineTo(mapX(points[points.length-1].t.getTime()), y1);
-      ctx.lineTo(mapX(points[0].t.getTime()), y1);
+      // area under curve
+      ctx.lineTo(mapX(pts[pts.length-1].t.getTime()), y1);
+      ctx.lineTo(mapX(pts[0].t.getTime()), y1);
       ctx.closePath();
-      ctx.fillStyle = 'rgba(25,118,210,0.06)';
+      ctx.fillStyle = color === '#1976d2' ? 'rgba(25,118,210,0.06)' : 'rgba(211,47,47,0.06)';
       ctx.fill();
 
       // draw points
       ctx.fillStyle = '#fff';
-      ctx.strokeStyle = '#1976d2';
+      ctx.strokeStyle = color;
       ctx.lineWidth = 1.2;
-      for (const p of points) {
+      for (const p of pts) {
         const x = mapX(p.t.getTime());
-        const y = mapY(p.v);
+        const y = mapY(p[valueKey]);
         ctx.beginPath();
         ctx.arc(x, y, 3.2, 0, Math.PI*2);
         ctx.fill();
         ctx.stroke();
       }
 
-      // interactivity: simple tooltip on hover
+      // interactivity: tooltip on hover for this canvas
       canvas.onmousemove = function (ev) {
         const rect = canvas.getBoundingClientRect();
         const mx = ev.clientX - rect.left;
         const my = ev.clientY - rect.top;
-        // find nearest point within some px
         let best = null, bestDist = Infinity;
-        for (const p of points) {
+        for (const p of pts) {
           const x = mapX(p.t.getTime());
-          const y = mapY(p.v);
+          const y = mapY(p[valueKey]);
           const dx = x - mx, dy = y - my;
           const d2 = dx*dx + dy*dy;
           if (d2 < bestDist) { bestDist = d2; best = {p, x, y}; }
         }
-        // if close enough show a small tooltip
         if (best && bestDist < 14*14) {
-          // redraw to clear previous hover marker
-          drawChart(points); // crude but simple -> avoid layering complexity
-          // draw marker
+          // redraw base chart
+          drawSingleChart(canvas, ctx, points, valueKey, color);
+          // marker
           ctx.beginPath();
-          ctx.fillStyle = '#1976d2';
+          ctx.fillStyle = color;
           ctx.arc(best.x, best.y, 5, 0, Math.PI*2);
           ctx.fill();
           // tooltip
-          const txt = best.p.t.toLocaleString() + ' — ' + best.p.v.toFixed(2) + ' °';
+          const val = best.p[valueKey];
+          const txt = best.p.t.toLocaleString() + ' — ' + (val !== null ? val.toFixed(2) : 'n/a') + ' °';
           const padding = 6;
           ctx.font = '12px system-ui, Arial';
           const metrics = ctx.measureText(txt);
@@ -343,21 +346,15 @@
           let ty = best.y - th - 6;
           if (tx + tw > canvas.width - 6) tx = best.x - tw - 12;
           if (ty < 6) ty = best.y + 12;
-          // box
           ctx.fillStyle = 'rgba(0,0,0,0.75)';
           roundRect(ctx, tx, ty, tw, th, 6, true, false);
-          // text
           ctx.fillStyle = '#fff';
           ctx.textAlign = 'left';
           ctx.textBaseline = 'middle';
           ctx.fillText(txt, tx + padding, ty + th/2);
-        } else {
-          // when not hovering enough, we still want normal chart drawn (keep hover clear)
-          // no-op: the chart has been redrawn already by drawChart call in previous hover; optional optimization omitted
         }
       };
 
-      // helper draw rounded rect
       function roundRect(ctx, x, y, w, h, r, fill, stroke) {
         if (w < 2 * r) r = w / 2;
         if (h < 2 * r) r = h / 2;
@@ -382,7 +379,8 @@
         parsedPoints = parseText(txt);
         updateAndDraw();
       } catch (err) {
-        alert('Error fetching temperatures.txt: ' + err.message + '\nNote: the file must be served from the same origin as this page (or CORS enabled).');
+        // keep non-intrusive: show message instead of alert so it's not annoying on page load
+        msgEl.textContent = 'Could not fetch temperatures.txt: ' + err.message + ' (same-origin or CORS required). You can still load a file manually.';
       }
     }
 
@@ -398,23 +396,33 @@
 
     function updateAndDraw() {
       const last24 = filterLast24(parsedPoints);
-      const stats = computeStats(last24);
-      if (stats) {
-        statsEl.innerHTML = `
-          Count: ${stats.count} readings — Min: ${stats.min.toFixed(2)} °, Max: ${stats.max.toFixed(2)} °, Avg: ${stats.avg.toFixed(2)} °<br>
-          From: ${stats.first.toLocaleString()} to ${stats.last.toLocaleString()}
-        `;
-      } else {
-        statsEl.textContent = 'No readings in the last 24 hours.';
-      }
-      drawChart(last24);
+      const statsTop = computeStats(last24, 'v1');
+      const statsBottom = computeStats(last24, 'v2');
+
+      // update stats display
+      const topLine = statsTop
+        ? `Top (XX): Count: ${statsTop.count} — Min: ${statsTop.min.toFixed(2)} °, Max: ${statsTop.max.toFixed(2)} °, Avg: ${statsTop.avg.toFixed(2)} ° (From: ${statsTop.first.toLocaleString()} to ${statsTop.last.toLocaleString()})`
+        : 'Top (XX): No readings in the last 24 hours.';
+      const bottomLine = statsBottom
+        ? `Bottom (YY): Count: ${statsBottom.count} — Min: ${statsBottom.min.toFixed(2)} °, Max: ${statsBottom.max.toFixed(2)} °, Avg: ${statsBottom.avg.toFixed(2)} ° (From: ${statsBottom.first.toLocaleString()} to ${statsBottom.last.toLocaleString()})`
+        : 'Bottom (YY): No readings in the last 24 hours.';
+      statsEl.innerHTML = `<div>${topLine}</div><div>${bottomLine}</div>`;
+
+      // draw both charts (top: blue, bottom: red)
+      drawSingleChart(canvasTop, ctxTop, last24, 'v1', '#1976d2');
+      drawSingleChart(canvasBottom, ctxBottom, last24, 'v2', '#d32f2f');
     }
 
-    // initial example: empty chart message
-    clearCanvas();
-    ctx.fillStyle = '#333';
-    ctx.font = '14px system-ui, Arial';
-    ctx.fillText('Load a temperature text file (see formats in the message above)', 20, 40);
+    // initial empty messages on both canvases
+    clearCanvas(ctxTop, canvasTop);
+    ctxTop.fillStyle = '#333';
+    ctxTop.font = '14px system-ui, Arial';
+    ctxTop.fillText('Loading chart... (will auto-fetch temperatures.txt)', 20, 40);
+
+    clearCanvas(ctxBottom, canvasBottom);
+    ctxBottom.fillStyle = '#333';
+    ctxBottom.font = '14px system-ui, Arial';
+    ctxBottom.fillText('Loading chart... (will auto-fetch temperatures.txt)', 20, 40);
 
     // events
     fileInput.addEventListener('change', (e) => {
@@ -436,23 +444,34 @@
     });
 
     downloadBtn.addEventListener('click', () => {
-      const url = canvas.toDataURL('image/png');
+      // create a temporary canvas that stacks top and bottom charts vertically
+      const w = Math.max(canvasTop.width, canvasBottom.width);
+      const h = canvasTop.height + canvasBottom.height + 12; // small spacing
+      const tmp = document.createElement('canvas');
+      tmp.width = w;
+      tmp.height = h;
+      const tctx = tmp.getContext('2d');
+      // white background
+      tctx.fillStyle = '#fff';
+      tctx.fillRect(0,0,w,h);
+      // draw top then bottom
+      tctx.drawImage(canvasTop, 0, 0);
+      tctx.drawImage(canvasBottom, 0, canvasTop.height + 12);
+      const url = tmp.toDataURL('image/png');
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'temperature-last-24h.png';
+      a.download = 'temperature-last-24h-both.png';
       document.body.appendChild(a);
       a.click();
       a.remove();
     });
 
     // Try to automatically fetch temperatures.txt on page load (same-origin or CORS-enabled)
-    // This makes the chart load without requiring the user to click fetch or pick a file.
-    // If fetch fails, existing error alert will show and user can still use the UI.
     loadFromFetch();
 
     // expose parse helper for console (debug)
     window._tempChart = {
-      parseText, parseTimestamp, updateAndDraw
+      parseText, parseTimestamp, updateAndDraw, parsedPoints
     };
   })();
   </script>
