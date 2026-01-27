@@ -86,7 +86,7 @@
       const nulls = points.filter(p => p.t === null);
       if (nulls.length) {
         const now = Date.now();
-        const minute = 60_000;
+        const minute = 60000;
         for (let i = 0; i < nulls.length; i++) {
           const ageIndex = nulls.length - 1 - i;
           nulls[i].t = new Date(now - ageIndex * minute);
@@ -210,7 +210,7 @@
       }
 
       // x ticks (adaptive)
-      const msPerHour = 3600_000;
+      const msPerHour = 3600000;
       const rangeHours = Math.max(1, (tmax - tmin) / msPerHour);
       const approxTicks = Math.min(8, Math.max(3, Math.round(rangeHours / 3)));
       const tickIntervalMs = Math.ceil((tmax - tmin) / approxTicks / 60000) * 60000;
@@ -348,9 +348,11 @@
       }
     }
 
+    // Load file using cache-busting query param to avoid cached responses
     async function loadFromFetch() {
       try {
-        const res = await fetch('temperatures.txt', {cache: 'no-store'});
+        const url = 'temperatures.txt?ts=' + Date.now();
+        const res = await fetch(url, {cache: 'no-store'});
         if (!res.ok) throw new Error('Fetch failed: ' + res.status);
         const txt = await res.text();
         rawDataText = txt;
@@ -405,10 +407,10 @@
     // Try to automatically fetch temperatures.txt on page load (same-origin or CORS-enabled)
     loadFromFetch();
 
-    // Auto-refresh data once a minute (60000 ms)
-    setInterval(() => {
-      loadFromFetch();
-    }, 60_000);
+    // Auto-refresh data once a minute (60000 ms) with error logging
+    setInterval(function () {
+      loadFromFetch().catch(err => console.warn('Periodic load failed:', err));
+    }, 60000);
 
     // expose parse helper for console (debug)
     window._tempChart = {
