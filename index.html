@@ -10,6 +10,8 @@
     h1 { font-size:1.1rem; margin:0; }
     .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
     input[type="file"] { display:inline-block; }
+    button { padding:6px 10px; border-radius:6px; border:1px solid #bbb; background:#f6f6f6; cursor:pointer; }
+    button:hover { background:#eef; }
     #stats { margin-top:8px; font-size:0.95rem; }
     #message { color:#666; margin-top:8px; }
     canvas { background: #fff; border:1px solid #ddd; border-radius:6px; max-width:100%; display:block; margin-bottom:12px; }
@@ -21,18 +23,32 @@
 <body>
   <header>
     <h1>Temperature — Last 24 hours</h1>
+    <div style="color:#666;font-size:0.95rem;">Reads a plaintext file and draws the last-24h graphs (top and bottom)</div>
   </header>
+
+  <div class="controls">
+    <label>
+      Load file:
+      <input id="fileInput" type="file" accept=".txt,.csv" />
+    </label>
+
+    <button id="fetchBtn">Fetch "temperatures.txt" (same origin)</button>
+    <button id="reloadBtn">Re-draw</button>
+    <button id="downloadBtn">Download both charts PNG</button>
+  </div>
+
+  <div id="message">Supported file formats (per line): <code>2026-01-23T12:34:00Z,XX,YY</code> where XX is the top graph value and YY is the bottom graph value. Also accepts older formats: <code>1611350400,23.5</code> (unix seconds or ms), or single-value lines — those will be used for both graphs.</div>
 
   <div id="stats" aria-live="polite"></div>
 
   <!-- Top chart -->
-  <canvas id="chartTop" width="1000" height="320" role="img" aria-label="Top: Temperature at home over last 24 hours"></canvas>
+  <canvas id="chartTop" width="1000" height="320" role="img" aria-label="Top: Temperature series A over last 24 hours"></canvas>
   <!-- Bottom chart -->
-  <canvas id="chartBottom" width="1000" height="320" role="img" aria-label="Bottom: Temperature outside over last 24 hours"></canvas>
+  <canvas id="chartBottom" width="1000" height="320" role="img" aria-label="Bottom: Temperature series B over last 24 hours"></canvas>
 
   <div class="legend">
-    <span><span class="dot" style="background:#1976d2"></span>Home temperature</span>
-    <span><span class="dot" style="background:#d32f2f"></span>Outside temperature</span>
+    <span><span class="dot" style="background:#1976d2"></span>Top series (XX)</span>
+    <span><span class="dot" style="background:#d32f2f"></span>Bottom series (YY)</span>
   </div>
 
   <script>
@@ -43,6 +59,9 @@
     const ctxBottom = canvasBottom.getContext('2d');
 
     const fileInput = document.getElementById('fileInput');
+    const fetchBtn = document.getElementById('fetchBtn');
+    const reloadBtn = document.getElementById('reloadBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
     const statsEl = document.getElementById('stats');
     const msgEl = document.getElementById('message');
 
@@ -360,7 +379,7 @@
         parsedPoints = parseText(txt);
         updateAndDraw();
       } catch (err) {
-        // non-intrusive: show message instead of alert
+        // keep non-intrusive: show message instead of alert so it's not annoying on page load
         msgEl.textContent = 'Could not fetch temperatures.txt: ' + err.message + ' (same-origin or CORS required). You can still load a file manually.';
       }
     }
@@ -409,6 +428,42 @@
     fileInput.addEventListener('change', (e) => {
       const f = e.target.files && e.target.files[0];
       if (f) handleFile(f);
+    });
+
+    fetchBtn.addEventListener('click', () => {
+      loadFromFetch();
+    });
+
+    reloadBtn.addEventListener('click', () => {
+      if (rawDataText === null) {
+        alert('No file loaded yet. Either pick a file or click "Fetch temperatures.txt".');
+        return;
+      }
+      parsedPoints = parseText(rawDataText);
+      updateAndDraw();
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      // create a temporary canvas that stacks top and bottom charts vertically
+      const w = Math.max(canvasTop.width, canvasBottom.width);
+      const h = canvasTop.height + canvasBottom.height + 12; // small spacing
+      const tmp = document.createElement('canvas');
+      tmp.width = w;
+      tmp.height = h;
+      const tctx = tmp.getContext('2d');
+      // white background
+      tctx.fillStyle = '#fff';
+      tctx.fillRect(0,0,w,h);
+      // draw top then bottom
+      tctx.drawImage(canvasTop, 0, 0);
+      tctx.drawImage(canvasBottom, 0, canvasTop.height + 12);
+      const url = tmp.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'temperature-last-24h-both.png';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     });
 
     // Try to automatically fetch temperatures.txt on page load (same-origin or CORS-enabled)
