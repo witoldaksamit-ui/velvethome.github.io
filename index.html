@@ -37,7 +37,7 @@
     <button id="downloadBtn">Download chart PNG</button>
   </div>
 
-  <div id="message">Supported file formats (per line): <code>2026-01-23T12:34:00Z,23.5</code>, <code>1611350400,23.5</code> (unix seconds or ms), or <code>23.5</code> (one value per minute — last reading is latest).</div>
+  <div id="message">Supported file formats (per line): <code>2026-01-23T12:34:00Z,23.5</code>, <code>1611350400,23.5</code> (unix seconds or ms), or <code>23.5</code> (one value per minute — last re[...]
 
   <div id="stats" aria-live="polite"></div>
 
@@ -444,6 +444,11 @@
       a.click();
       a.remove();
     });
+
+    // Try to automatically fetch temperatures.txt on page load (same-origin or CORS-enabled)
+    // This makes the chart load without requiring the user to click fetch or pick a file.
+    // If fetch fails, existing error alert will show and user can still use the UI.
+    loadFromFetch();
 
     // expose parse helper for console (debug)
     window._tempChart = {
