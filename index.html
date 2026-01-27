@@ -9,9 +9,6 @@
     header { display:flex; align-items:center; gap:16px; margin-bottom:12px; }
     h1 { font-size:1.1rem; margin:0; }
     .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
-    input[type="file"] { display:inline-block; }
-    button { padding:6px 10px; border-radius:6px; border:1px solid #bbb; background:#f6f6f6; cursor:pointer; }
-    button:hover { background:#eef; }
     #stats { margin-top:8px; font-size:0.95rem; }
     canvas { background: #fff; border:1px solid #ddd; border-radius:6px; max-width:100%; display:block; margin-bottom:12px; }
     .legend { margin-top:8px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
@@ -22,7 +19,7 @@
 <body>
   <header>
     <h1>Temperature — Last 24 hours</h1>
-    <!-- <div style="color:#666;font-size:0.95rem;">Reads a plaintext file and draws the last-24h graphs (top and bottom)</div> -->
+    <div style="color:#666;font-size:0.95rem;">Reads a plaintext file and draws the last-24h graphs (top and bottom)</div>
   </header>
 
   <div id="stats" aria-live="polite"></div>
@@ -407,6 +404,11 @@
 
     // Try to automatically fetch temperatures.txt on page load (same-origin or CORS-enabled)
     loadFromFetch();
+
+    // Auto-refresh data once a minute (60000 ms)
+    setInterval(() => {
+      loadFromFetch();
+    }, 60_000);
 
     // expose parse helper for console (debug)
     window._tempChart = {
