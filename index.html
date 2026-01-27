@@ -25,23 +25,16 @@
     <div style="color:#666;font-size:0.95rem;">Reads a plaintext file and draws the last-24h graphs (top and bottom)</div>
   </header>
 
-  <div class="controls">
-    <label>
-      Load file:
-      <input id="fileInput" type="file" accept=".txt,.csv" />
-    </label>
-  </div>
-
   <div id="stats" aria-live="polite"></div>
 
   <!-- Top chart -->
-  <canvas id="chartTop" width="1000" height="320" role="img" aria-label="Top: Temperature series A over last 24 hours"></canvas>
+  <canvas id="chartTop" width="1000" height="320" role="img" aria-label="Temperatura w domu — wykres za ostatnie 24 godziny"></canvas>
   <!-- Bottom chart -->
-  <canvas id="chartBottom" width="1000" height="320" role="img" aria-label="Bottom: Temperature series B over last 24 hours"></canvas>
+  <canvas id="chartBottom" width="1000" height="320" role="img" aria-label="Temperatura na dworze — wykres za ostatnie 24 godziny"></canvas>
 
   <div class="legend">
-    <span><span class="dot" style="background:#1976d2"></span>Top series (XX)</span>
-    <span><span class="dot" style="background:#d32f2f"></span>Bottom series (YY)</span>
+    <span><span class="dot" style="background:#1976d2"></span>Temperatura w domu</span>
+    <span><span class="dot" style="background:#d32f2f"></span>Temperatura na dworze</span>
   </div>
 
   <script>
@@ -51,7 +44,6 @@
     const canvasBottom = document.getElementById('chartBottom');
     const ctxBottom = canvasBottom.getContext('2d');
 
-    const fileInput = document.getElementById('fileInput');
     const statsEl = document.getElementById('stats');
 
     let rawDataText = null;
@@ -368,8 +360,8 @@
         parsedPoints = parseText(txt);
         updateAndDraw();
       } catch (err) {
-        // non-intrusive: log the failure (no UI element for supported-format messages)
-        console.warn('Could not fetch temperatures.txt:', err.message, '(same-origin or CORS required). You can still load a file manually.');
+        // non-intrusive: log the failure
+        console.warn('Could not fetch temperatures.txt:', err.message, '(same-origin or CORS required).');
       }
     }
 
@@ -385,19 +377,19 @@
 
     function updateAndDraw() {
       const last24 = filterLast24(parsedPoints);
-      const statsTop = computeStats(last24, 'v1');
-      const statsBottom = computeStats(last24, 'v2');
+      const statsHome = computeStats(last24, 'v1');
+      const statsOutside = computeStats(last24, 'v2');
 
-      // update stats display
-      const topLine = statsTop
-        ? `Top (XX): Count: ${statsTop.count} — Min: ${statsTop.min.toFixed(2)} °, Max: ${statsTop.max.toFixed(2)} °, Avg: ${statsTop.avg.toFixed(2)} ° (From: ${statsTop.first.toLocaleString()} to ${statsTop.last ? statsTop.last.toLocaleString() : 'n/a'})`
-        : 'Top (XX): No readings in the last 24 hours.';
-      const bottomLine = statsBottom
-        ? `Bottom (YY): Count: ${statsBottom.count} — Min: ${statsBottom.min.toFixed(2)} °, Max: ${statsBottom.max.toFixed(2)} °, Avg: ${statsBottom.avg.toFixed(2)} ° (From: ${statsBottom.first.toLocaleString()} to ${statsBottom.last ? statsBottom.last.toLocaleString() : 'n/a'})`
-        : 'Bottom (YY): No readings in the last 24 hours.';
-      statsEl.innerHTML = `<div>${topLine}</div><div>${bottomLine}</div>`;
+      // update stats display (Polish labels)
+      const homeLine = statsHome
+        ? `Temperatura w domu: Count: ${statsHome.count} — Min: ${statsHome.min.toFixed(2)} °, Max: ${statsHome.max.toFixed(2)} °, Avg: ${statsHome.avg.toFixed(2)} ° (From: ${statsHome.first.toLocaleString()} to ${statsHome.last ? statsHome.last.toLocaleString() : 'n/a'})`
+        : 'Temperatura w domu: No readings in the last 24 hours.';
+      const outsideLine = statsOutside
+        ? `Temperatura na dworze: Count: ${statsOutside.count} — Min: ${statsOutside.min.toFixed(2)} °, Max: ${statsOutside.max.toFixed(2)} °, Avg: ${statsOutside.avg.toFixed(2)} ° (From: ${statsOutside.first.toLocaleString()} to ${statsOutside.last ? statsOutside.last.toLocaleString() : 'n/a'})`
+        : 'Temperatura na dworze: No readings in the last 24 hours.';
+      statsEl.innerHTML = `<div>${homeLine}</div><div>${outsideLine}</div>`;
 
-      // draw both charts (top: blue, bottom: red)
+      // draw both charts (home: blue, outside: red)
       drawSingleChart(canvasTop, ctxTop, last24, 'v1', '#1976d2');
       drawSingleChart(canvasBottom, ctxBottom, last24, 'v2', '#d32f2f');
     }
@@ -413,18 +405,12 @@
     ctxBottom.font = '14px system-ui, Arial';
     ctxBottom.fillText('Loading chart... (will auto-fetch temperatures.txt)', 20, 40);
 
-    // events
-    fileInput.addEventListener('change', (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (f) handleFile(f);
-    });
-
     // Try to automatically fetch temperatures.txt on page load (same-origin or CORS-enabled)
     loadFromFetch();
 
     // expose parse helper for console (debug)
     window._tempChart = {
-      parseText, parseTimestamp, updateAndDraw, parsedPoints
+      parseText, parseTimestamp, updateAndDraw, parsedPoints, handleFile
     };
   })();
   </script>
